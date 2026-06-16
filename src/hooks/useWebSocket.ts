@@ -8,6 +8,7 @@ export function useWebSocket() {
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const handleMessageRef = useRef<((msg: ServerMessage) => void) | null>(null);
   const scheduleReconnectRef = useRef<(() => void) | null>(null);
+  const isClosingRef = useRef(false);
 
   const setConfig = useAppStore((s) => s.setConfig);
   const setParticles = useAppStore((s) => s.setParticles);
@@ -46,6 +47,7 @@ export function useWebSocket() {
   }, [handleMessage]);
 
   const connect = useCallback(() => {
+    isClosingRef.current = false;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
 
@@ -54,6 +56,10 @@ export function useWebSocket() {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (isClosingRef.current) {
+          ws.close();
+          return;
+        }
         console.log('WebSocket connected');
         setConnected(true);
 
@@ -75,17 +81,26 @@ export function useWebSocket() {
       };
 
       ws.onclose = () => {
+        if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+        if (isClosingRef.current) {
+          return;
+        }
         console.log('WebSocket disconnected');
         setConnected(false);
-        if (heartbeatRef.current) clearInterval(heartbeatRef.current);
         scheduleReconnectRef.current?.();
       };
 
       ws.onerror = (err) => {
+        if (isClosingRef.current) {
+          return;
+        }
         console.error('WebSocket error:', err);
         ws.close();
       };
     } catch (e) {
+      if (isClosingRef.current) {
+        return;
+      }
       console.error('Failed to create WebSocket:', e);
       scheduleReconnectRef.current?.();
     }
@@ -144,10 +159,17 @@ export function useWebSocket() {
     connect();
 
     return () => {
+      isClosingRef.current = true;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (heartbeatRef.current) clearInterval(heartbeatRef.current);
-      if (wsRef.current) {
-        wsRef.current.close();
+      const ws = wsRef.current;
+      if (ws) {
+        if (ws.readyState === WebSocket.CONNECTING) {
+          // 连接还在握手中，等 onopen 触发后由标志位控制关闭
+          // 不在这里调用 close，避免触发 onerror/onclose 的错误日志
+        } else if (ws.readyState === WebSocket.OPEN) {
+          ws.close();
+        }
       }
     };
   }, [connect]);
